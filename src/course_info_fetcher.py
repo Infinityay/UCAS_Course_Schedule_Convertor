@@ -1,3 +1,4 @@
+from bs4 import BeautifulSoup
 import requests
 import re
 import base64
@@ -29,9 +30,11 @@ class CourseInfoFetcher:
     pic_url = config['pic_url']
     slogin_url = config['slogin_url']
     redirect_url = config['redirect_url']
+    redirect_url_master = config['redirect_master_url']
     score_base_url = config['score_base_url']
     course_base_url = config['course_base_url']
     course_info_url = config['course_info_url']
+    course_base_url_master = config['course_base_url_master']
 
     def __init__(self):
         # 使用自己训练的模型
@@ -110,7 +113,116 @@ class CourseInfoFetcher:
                         raise Exception('验证码错误次数过多')
                 else:
                     raise e
-            
+    @detailException
+    def get_master_course_name_and_time_link(self):
+        event_list = []
+        response = self.session.get(self.redirect_url_master)
+        if response.status_code == 200:
+            redirect_urls = self.redirect_re.findall(response.text)
+            if len(redirect_urls) == 0:
+                self.session.close()
+                raise Exception(f'get redirect url fail, all response is {response.text}')
+            redirect_url = redirect_urls[0]
+            response = self.session.get(redirect_url)
+            if response.status_code == 200:
+                section_to_time = {
+                            1: ("08:30", "09:20"),
+                            2: ("09:20", "10:10"),
+                            3: ("10:30", "11:20"),
+                            4: ("11:20", "12:10"),
+                            5: ("13:30", "14:20"),
+                            6: ("14:20", "15:10"),
+                            7: ("15:30", "16:20"),
+                            8: ("16:20", "17:10"),
+                            9: ("18:10", "19:00"),
+                            10: ("19:00", "19:50"),
+                            11: ("20:10", "21:00"),
+                            12: ("21:00", "21:50")
+                        }
+
+                soup = BeautifulSoup(response.text, 'html.parser')
+                tbody = soup.find('tbody')
+
+                if not tbody:
+                    raise Exception('Cannot find tbody in the response')
+
+                courses = []
+                for tr in tbody.find_all('tr'):
+                    tds = tr.find_all('td')
+                    if len(tds) >= 2:
+                        course_name = tds[1].text.strip()
+                        course_time_link = tds[1].find('a')['href']
+                        courses.append(course_time_link)
+
+                for course_link in courses:
+                    course_info_url = course_link + ".json" 
+                    response = self.session.get(course_info_url)
+                    course_info_json = response.json()
+                    course_time_list = course_info_json["courseTimeList"]
+
+                    for schedule in course_time_list:
+                        print(schedule["courseName"])
+                        week_binary = bin(int(schedule["courseWeek"]))[2:][::-1]
+                        time_binary = bin(int(schedule["courseTime"]))[2:]
+                        time_day = int(time_binary[:-12], 2)
+                        time_section_binary = time_binary[-12:][::-1]
+                        time_section_list = []
+                        week_list = []
+                        for idx, bit in enumerate(time_section_binary):
+                            if bit == '1':
+                                time_section_list.append(idx + 1)
+                        for idx, bit in enumerate(week_binary):
+                            if bit == '1':
+                                week_list.append(idx + 1)
+
+                        number2day = {1: "星期一", 2: "星期二", 3: "星期三", 4: "星期四", 5: "星期五", 6: "星期六", 7: "星期日"}
+                        print(number2day[time_day])
+                        print("上课时间段: ", time_section_list)
+                        print("上课周数: ", week_list)
+                        print("上课地点: ", schedule["coursePlace"])
+
+                        for week in week_list:
+                            event_list.append({
+                                "event_name": schedule["courseName"],
+                                "event_location": schedule["coursePlace"],
+                                "event_week": week,
+                                "event_day": time_day,
+                                "event_time": (
+                                    section_to_time[time_section_list[0]][0],
+                                    section_to_time[time_section_list[-1]][1]
+                                )
+                            })
+
+                    print("-------")
+
+                
+            else:
+                raise Exception(f'Failed to retrieve redirected URL, status code: {response.status_code}')
+        else:
+            raise Exception(f'Failed to retrieve master URL, status code: {response.status_code}')
+        # Read ics content from "course_schedule_tmp.ics"
+        ics_content = ""
+        with open("course_schedule_tmp.ics", "r") as f:
+            ics_content = f.read()
+        
+        for event in event_list:
+            ics_content += self.convert_event_to_ics_format(
+                event["event_name"],
+                event["event_location"],
+                event["event_week"],
+                event["event_day"],
+                event["event_time"]
+            )
+        
+        ics_content += "END:VCALENDAR\n"
+
+        # save ics file
+        with open("course_schedule.ics", "w", encoding='utf-8') as f:
+            f.write(ics_content)
+
+
+                
+
     @detailException
     def __get_course_data(self):
         event_list = []
@@ -215,7 +327,7 @@ class CourseInfoFetcher:
         with open("course_schedule.ics", "w", encoding='utf-8') as f:
             f.write(ics_content)
 
-        
+    
     @detailException
     def convert_event_to_ics_format(self, event_name, event_location, event_week, event_day, event_time):
         # Format: event_name, event_location: string
@@ -250,6 +362,51 @@ class CourseInfoFetcher:
 
         return event
 
+    # @detailException
+    # def convert_event_to_ics_format_master(self, event_name, event_location, event_week, event_day, event_time, reminder_minutes):
+    #     # Format: event_name, event_location: string
+    #     # event_week: int, 1 represents the week whose Monday lies on 2024-8-26
+    #     # event_day: int, 1 represents Monday
+    #     # event_time: tuple<string, string>, (start_time, end_time), e.g. ("08:00", "09:50")
+    #     # reminder_minutes: int, the number of minutes before the event to trigger the reminder
+        
+    #     # Calculate the date of the event
+    #     date = "2024-08-26"
+    #     date = date.split("-")
+    #     date = list(map(int, date))
+    #     date = datetime.date(date[0], date[1], date[2])
+    #     date += datetime.timedelta(weeks=event_week - 1)
+    #     date += datetime.timedelta(days=event_day - 1)
+    #     date = date.strftime("%Y%m%d")
+
+    #     # Calculate the start time and end time of the event
+    #     start_time = event_time[0].split(":")
+    #     start_time = list(map(int, start_time))
+    #     start_time = datetime.time(start_time[0], start_time[1])
+    #     end_time = event_time[1].split(":")
+    #     end_time = list(map(int, end_time))
+    #     end_time = datetime.time(end_time[0], end_time[1])
+
+    #     # Format the event with reminder
+    #     event = f"BEGIN:VEVENT\n"
+    #     event += f"SUMMARY:{event_name}\n"
+    #     event += f"LOCATION:{event_location}\n"
+    #     event += f"DTSTART;TZID=Asia/Shanghai:{date}T{start_time.strftime('%H%M%S')}\n"
+    #     event += f"DTEND;TZID=Asia/Shanghai:{date}T{end_time.strftime('%H%M%S')}\n"
+        
+    #     # Add dynamic reminder based on input reminder_minutes
+    #     event += f"""
+    # BEGIN:VALARM
+    # ACTION:DISPLAY
+    # DESCRIPTION:Reminder
+    # TRIGGER:-PT{reminder_minutes}M
+    # END:VALARM
+    # """
+
+    #     event += f"END:VEVENT\n"
+
+    #     return event
+
     @detailException
     def launch(self):
         logger.log('---------------')
@@ -262,3 +419,18 @@ class CourseInfoFetcher:
 
         logger.log('finish')
         logger.log('---------------')
+
+    @detailException
+    def login_and_get_data(self):
+        logger.log('---------------')
+        logger.log('start')
+        try:
+            self.__login()
+            course_name_and_link = self.get_master_course_name_and_time_link()
+            logger.log(course_name_and_link)
+        except Exception as e:
+            logger.log(f'error: {e}')
+
+        logger.log('finish')
+        logger.log('---------------')
+ 
